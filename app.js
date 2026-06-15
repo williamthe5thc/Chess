@@ -1,9 +1,9 @@
 /**
  * Chess for Dad — Father's Day Gift PWA
- * Vanilla JS · chess.js · Stockfish WASM via blob-URL Worker
+ * Vanilla JS · chess.js · Stockfish via blob-URL Worker
  */
 
-/* ── 1. Bootstrap: load chess.js then init ── */
+/* ── 1. Bootstrap ── */
 (function bootstrap() {
   const s = document.createElement('script');
   s.src = 'https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js';
@@ -12,26 +12,12 @@
   document.head.appendChild(s);
 })();
 
-/* ── 2. Piece Unicode Map ── */
+/* ── 2. Piece Maps ── */
 const UNICODE = {
   wK:'♔', wQ:'♕', wR:'♖', wB:'♗', wN:'♘', wP:'♙',
   bK:'♚', bQ:'♛', bR:'♜', bB:'♝', bN:'♞', bP:'♟',
 };
 
-/*
- * ── 3. Family Piece Image Map ──
- * Drop your photos into pieces/family/ with these exact filenames.
- * Supported extensions: jpg, jpeg, png, webp, svg (code tries jpg first).
- * Pawn images are keyed by the pawn's current file (a-h) so each dog
- * shows on its column. Files are relative to index.html.
- *
- * king.jpg   → Dad
- * queen.jpg  → Mom
- * knight.jpg → Kids / spouse on knight squares
- * bishop.jpg → Kids / spouse on bishop squares
- * rook.jpg   → Kids / spouse on rook squares
- * pawn_a.jpg through pawn_h.jpg → 8 dogs
- */
 const FAMILY_IMGS = {
   K: 'pieces/family/king.svg',
   Q: 'pieces/family/queen.svg',
@@ -44,32 +30,66 @@ const FAMILY_IMGS = {
        g:'pieces/family/pawn_g.svg', h:'pieces/family/pawn_h.svg' },
 };
 
+/* ── 3. ELO Tier Labels ── */
+const ELO_TIERS = [
+  { max:  700, label: 'Beginner' },
+  { max: 1200, label: 'Casual' },
+  { max: 1600, label: 'Intermediate' },
+  { max: 2000, label: 'Advanced' },
+  { max: 2500, label: 'Expert' },
+  { max: 3000, label: 'Master' },
+];
+
+function eloTier(elo) {
+  for (const t of ELO_TIERS) { if (elo <= t.max) return t.label; }
+  return 'Master';
+}
+
+/* Blunder rate at given ELO (0 = never random, 1 = always random).
+   Applies for ELO < 1320 where Stockfish UCI_LimitStrength floor kicks in. */
+function blunderRate(elo) {
+  if (elo >= 1320) return 0;
+  return 0.85 * Math.pow((1320 - elo) / (1320 - 250), 1.3);
+}
+
+/* Depth to use for AI below 1320 ELO */
+function lowEloDepth(elo) {
+  if (elo >= 1000) return 2;
+  if (elo >= 600)  return 1;
+  return 1;
+}
+
 /* ── 4. Stockfish Worker ── */
-let stockfish = null;
-let sfReady = false;
-let sfCallbacks = [];
+let stockfish    = null;
+let sfReady      = false;
+let sfCallbacks  = [];
+let sfBusy       = false;
+let sfCancelFn   = null;   // call to cancel the current Stockfish task
 
 function loadStockfish() {
-  const sfUrl = 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js';
-  fetch(sfUrl)
+  const url = 'https://cdnjs.cloudflare.com/ajax/libs/stockfish.js/10.0.2/stockfish.js';
+  fetch(url)
     .then(r => r.text())
     .then(code => {
       const blob = new Blob([code], { type: 'application/javascript' });
       stockfish = new Worker(URL.createObjectURL(blob));
       stockfish.onmessage = e => { sfCallbacks = sfCallbacks.filter(cb => !cb(e.data)); };
-      stockfish.onerror   = err => console.error('Stockfish:', err);
+      stockfish.onerror   = err => console.error('Stockfish error:', err);
       stockfish.postMessage('uci');
       stockfish.postMessage('isready');
-      sfOnce(l => l === 'readyok', () => { sfReady = true; });
+      sfOnce(l => l === 'readyok', () => {
+        sfReady = true;
+        applyEloSettings(currentElo);
+      });
     })
     .catch(() => {
       try {
-        stockfish = new Worker(sfUrl);
+        stockfish = new Worker(url);
         stockfish.onmessage = e => { sfCallbacks = sfCallbacks.filter(cb => !cb(e.data)); };
         stockfish.postMessage('uci');
         stockfish.postMessage('isready');
-        sfOnce(l => l === 'readyok', () => { sfReady = true; });
-      } catch (_) { console.error('Stockfish unavailable.'); }
+        sfOnce(l => l === 'readyok', () => { sfReady = true; applyEloSettings(currentElo); });
+      } catch(_) { console.error('Stockfish unavailable — AI disabled.'); }
     });
 }
 
@@ -77,49 +97,155 @@ function sfOnce(predicate, resolve) {
   sfCallbacks.push(line => { if (predicate(line)) { resolve(line); return true; } return false; });
 }
 
-function sfBestMove(fen, depthMin, depthMax) {
+function sfStop() {
+  if (stockfish) stockfish.postMessage('stop');
+  sfCallbacks = [];
+  sfBusy = false;
+  if (sfCancelFn) { sfCancelFn(); sfCancelFn = null; }
+}
+
+function applyEloSettings(elo) {
+  if (!stockfish || !sfReady) return;
+  if (elo >= 1320) {
+    stockfish.postMessage('setoption name UCI_LimitStrength value true');
+    stockfish.postMessage('setoption name UCI_Elo value ' + Math.min(3190, elo));
+  } else {
+    stockfish.postMessage('setoption name UCI_LimitStrength value false');
+  }
+}
+
+/* Ask Stockfish for best move. Returns promise resolving to UCI string or null. */
+function sfBestMove(fen, depth) {
   return new Promise(resolve => {
     if (!stockfish || !sfReady) { resolve(null); return; }
-    const depth = depthMin + Math.floor(Math.random() * (depthMax - depthMin + 1));
+    sfBusy = true;
+    sfCancelFn = () => resolve(null);
+
     stockfish.postMessage('position fen ' + fen);
     stockfish.postMessage('go depth ' + depth);
+
     sfOnce(
       line => line.startsWith('bestmove'),
-      line => { const p = line.split(' '); resolve(p[1] === '(none)' ? null : p[1]); }
+      line => {
+        sfBusy = false;
+        sfCancelFn = null;
+        const p = line.split(' ');
+        resolve(p[1] === '(none)' ? null : p[1]);
+      }
     );
   });
 }
 
+/* Evaluate a position. Returns {type:'cp'|'mate', value:number} or null.
+   Uses movetime (ms) so it doesn't block indefinitely.
+   From White's perspective: positive = White ahead, negative = Black ahead. */
+function sfEvaluate(fen, movetime) {
+  return new Promise(resolve => {
+    if (!stockfish || !sfReady || sfBusy) { resolve(null); return; }
+    sfBusy = true;
+    sfCancelFn = () => { resolve(null); };
+
+    let bestScore = null;
+
+    stockfish.postMessage('position fen ' + fen);
+    stockfish.postMessage('go movetime ' + movetime);
+
+    const listener = line => {
+      if (line.startsWith('info') && line.includes(' score ')) {
+        const cpM   = line.match(/score cp (-?\d+)/);
+        const mateM = line.match(/score mate (-?\d+)/);
+        if (cpM)   bestScore = { type: 'cp',   value: parseInt(cpM[1],   10) };
+        if (mateM) bestScore = { type: 'mate', value: parseInt(mateM[1], 10) };
+      }
+      if (line.startsWith('bestmove')) {
+        sfBusy = false;
+        sfCancelFn = null;
+        resolve(bestScore);
+        return true;
+      }
+      return false;
+    };
+
+    sfCallbacks.push(listener);
+  });
+}
+
+/* Format an eval score for display */
+function formatScore(score, turn) {
+  if (!score) return '0.0';
+  /* Flip sign if it's black's perspective (info lines from Stockfish are
+     always from the side to move, but we normalise to White = positive) */
+  let val = score.value;
+  if (turn === 'b') val = -val;  // after White's move the stored FEN has Black to move
+
+  if (score.type === 'mate') {
+    const sign = val > 0 ? '+' : '';
+    return sign + 'M' + Math.abs(val);
+  }
+  const pawns = val / 100;
+  const sign  = pawns > 0 ? '+' : '';
+  return sign + pawns.toFixed(1);
+}
+
+/* Convert centipawn score to a win-percentage for the eval bar (0–1).
+   Uses a sigmoid centred at 0. */
+function cpToWinPct(score, turn) {
+  if (!score) return 0.5;
+  if (score.type === 'mate') {
+    let v = score.value;
+    if (turn === 'b') v = -v;
+    return v > 0 ? 0.97 : 0.03;
+  }
+  let cp = score.value;
+  if (turn === 'b') cp = -cp;
+  return 1 / (1 + Math.exp(-cp / 400));
+}
+
 /* ── 5. Game State ── */
 let chess;
-let selectedSq   = null;
-let legalMoves   = [];
-let lastMove     = null;
-let depthMin     = 1;
-let depthMax     = 2;
-let gameOver     = false;
-let historyOpen  = false;
-let pieceSet     = 'classic';   // 'classic' | 'family'
-let hintTimeout  = null;
+let selectedSq       = null;
+let legalMoves       = [];
+let lastMove         = null;
+let currentElo       = 800;
+let gameOver         = false;
+let pieceSet         = 'classic';
+let evalEnabled      = false;
+let previewEnabled   = false;
+let settingsOpen     = false;
+let historyOpen      = false;
+let hintTimeout      = null;
 let promotionResolve = null;
+let previewDebounce  = null;
+let lastEvalScore    = null;  // stored for display
 
 const FILES = ['a','b','c','d','e','f','g','h'];
 const RANKS = ['8','7','6','5','4','3','2','1'];
 
 /* ── 6. DOM Refs ── */
-const $board         = document.getElementById('board');
-const $status        = document.getElementById('status-bar');
-const $historyList   = document.getElementById('history-list');
-const $historyPanel  = document.getElementById('history-panel');
-const $historyArrow  = document.getElementById('history-arrow');
-const $newGameBtn    = document.getElementById('new-game-btn');
-const $historyToggle = document.getElementById('history-toggle');
-const $splash        = document.getElementById('splash');
-const $app           = document.getElementById('app');
-const $splashBtn     = document.getElementById('splash-btn');
-const $promoModal    = document.getElementById('promotion-modal');
-const $hintBtn       = document.getElementById('hint-btn');
-const $undoBtn       = document.getElementById('undo-btn');
+const $board          = document.getElementById('board');
+const $status         = document.getElementById('status-bar');
+const $historyList    = document.getElementById('history-list');
+const $historyPanel   = document.getElementById('history-panel');
+const $historyArrow   = document.getElementById('history-arrow');
+const $newGameBtn     = document.getElementById('new-game-btn');
+const $historyToggle  = document.getElementById('history-toggle');
+const $settingsToggle = document.getElementById('settings-toggle');
+const $settingsPanel  = document.getElementById('settings-panel');
+const $settingsArrow  = document.getElementById('settings-arrow');
+const $splash         = document.getElementById('splash');
+const $app            = document.getElementById('app');
+const $splashBtn      = document.getElementById('splash-btn');
+const $promoModal     = document.getElementById('promotion-modal');
+const $hintBtn        = document.getElementById('hint-btn');
+const $undoBtn        = document.getElementById('undo-btn');
+const $eloSlider      = document.getElementById('elo-slider');
+const $eloValue       = document.getElementById('elo-value');
+const $eloTier        = document.getElementById('elo-tier');
+const $toggleEval     = document.getElementById('toggle-eval');
+const $togglePreview  = document.getElementById('toggle-preview');
+const $evalBarWrap    = document.getElementById('eval-bar-wrap');
+const $evalBarWhite   = document.getElementById('eval-bar-white');
+const $evalScore      = document.getElementById('eval-score');
 
 /* ── 7. Splash ── */
 function initSplash() {
@@ -143,28 +269,25 @@ function makePieceEl(piece, sq) {
     const type = piece.type.toUpperCase();
     const src  = type === 'P' ? FAMILY_IMGS.P[sq[0]] : FAMILY_IMGS[type];
     img.src = src || '';
-    img.className = `piece-img ${piece.color === 'b' ? 'black-piece' : ''}`;
+    img.className = `piece-img${piece.color === 'b' ? ' black-piece' : ''}`;
     img.alt = '';
     img.draggable = false;
 
     img.onerror = () => {
-      /* Fallback to unicode if image missing */
       wrapper.remove();
       const cell = squareEl(sq);
-      if (cell) {
-        const fb = document.createElement('div');
-        fb.className = `piece ${piece.color === 'w' ? 'white' : 'black'}`;
-        fb.textContent = UNICODE[(piece.color === 'w' ? 'w' : 'b') + piece.type.toUpperCase()];
-        fb.dataset.sq = sq;
-        cell.appendChild(fb);
-      }
+      if (!cell) return;
+      const fb = document.createElement('div');
+      fb.className = `piece ${piece.color === 'w' ? 'white' : 'black'}`;
+      fb.textContent = UNICODE[(piece.color === 'w' ? 'w' : 'b') + piece.type.toUpperCase()];
+      fb.dataset.sq = sq;
+      cell.appendChild(fb);
     };
 
     wrapper.appendChild(img);
     return wrapper;
   }
 
-  /* Classic unicode */
   const el = document.createElement('div');
   el.className = `piece ${piece.color === 'w' ? 'white' : 'black'}`;
   el.textContent = UNICODE[(piece.color === 'w' ? 'w' : 'b') + piece.type.toUpperCase()];
@@ -223,6 +346,18 @@ function renderBoard() {
       $board.appendChild(cell);
     });
   });
+
+  updateBoardSize();
+}
+
+/* Dynamically set the board CSS variable based on current eval bar visibility */
+function updateBoardSize() {
+  const evalH   = evalEnabled ? 28 : 0;
+  const fixedH  = 48 + 40 + evalH + 80 + 32; /* header+status+eval+controls+section-toggles */
+  const size    = `min(calc(100dvh - ${fixedH}px - 16px), calc(100vw - 16px))`;
+  document.getElementById('board').style.setProperty('--board-size-calc', size);
+  document.getElementById('board').style.width  = size;
+  document.getElementById('board').style.height = size;
 }
 
 function applySelectionHighlights() {
@@ -230,6 +365,8 @@ function applySelectionHighlights() {
     el.classList.remove('selected');
     el.querySelector('.move-dot')?.remove();
     el.querySelector('.capture-ring')?.remove();
+    el.querySelector('.preview-badge')?.remove();
+    el.classList.remove('preview-target');
   });
 
   if (!selectedSq) return;
@@ -279,7 +416,30 @@ function updateStatus() {
   if (chess.turn() === 'b') $status.classList.add('thinking');
 }
 
-/* ── 10. Move History ── */
+/* ── 10. Eval Bar ── */
+function showEvalBar(score, turn) {
+  if (!evalEnabled) return;
+  lastEvalScore = score;
+  const pct     = cpToWinPct(score, turn) * 100;
+  $evalBarWhite.style.width = pct.toFixed(1) + '%';
+  $evalScore.textContent    = formatScore(score, turn);
+}
+
+function resetEvalBar() {
+  $evalBarWhite.style.width = '50%';
+  $evalScore.textContent    = '0.0';
+}
+
+async function runEval() {
+  if (!evalEnabled || sfBusy || chess.game_over()) return;
+  const fen   = chess.fen();
+  const turn  = chess.turn(); // who is to move AFTER the last move (i.e., next player)
+  const score = await sfEvaluate(fen, 400);
+  /* sfEvaluate returns score from the side to move, so we pass turn to formatScore/cpToWinPct */
+  showEvalBar(score, turn);
+}
+
+/* ── 11. Move History ── */
 function refreshHistory() {
   const history = chess.history({ verbose: false });
   $historyList.innerHTML = '';
@@ -293,7 +453,7 @@ function refreshHistory() {
   $historyList.scrollLeft = $historyList.scrollWidth;
 }
 
-/* ── 11. Promotion ── */
+/* ── 12. Promotion ── */
 function askPromotion() {
   return new Promise(resolve => {
     promotionResolve = resolve;
@@ -301,9 +461,9 @@ function askPromotion() {
   });
 }
 
-/* ── 12. Make a Move ── */
+/* ── 13. Make a Move ── */
 async function makeMove(from, to, promoPiece) {
-  const piece = chess.get(from);
+  const piece  = chess.get(from);
   const isPromo = piece && piece.type === 'p' &&
     ((piece.color === 'w' && to[1] === '8') || (piece.color === 'b' && to[1] === '1'));
 
@@ -318,7 +478,7 @@ async function makeMove(from, to, promoPiece) {
   const result = chess.move(moveObj);
   if (!result) return false;
 
-  lastMove  = { from, to };
+  lastMove   = { from, to };
   selectedSq = null;
   legalMoves = [];
   gameOver   = false;
@@ -327,24 +487,47 @@ async function makeMove(from, to, promoPiece) {
   updateStatus();
   refreshHistory();
 
-  if (!chess.game_over()) triggerAI();
+  if (!chess.game_over()) {
+    runEval();      /* eval before AI moves */
+    triggerAI();
+  } else {
+    runEval();
+  }
   return true;
 }
 
-/* ── 13. AI Turn ── */
+/* ── 14. AI Turn ── */
 async function triggerAI() {
   if (chess.turn() !== 'b' || chess.game_over()) return;
+
+  /* If eval is running, cancel it so AI can go */
+  if (sfBusy) sfStop();
+
   updateStatus();
 
-  const fen      = chess.fen();
-  const bestMove = await sfBestMove(fen, depthMin, depthMax);
-  if (!bestMove || chess.game_over()) return;
+  const elo    = currentElo;
+  const rate   = blunderRate(elo);
+  let moveUci  = null;
 
-  const from  = bestMove.slice(0, 2);
-  const to    = bestMove.slice(2, 4);
-  const promo = bestMove.length === 5 ? bestMove[4] : undefined;
+  if (rate > 0 && Math.random() < rate) {
+    /* Random legal move (simulates weak/blundering player) */
+    const moves = chess.moves({ verbose: true });
+    if (moves.length > 0) {
+      const m = moves[Math.floor(Math.random() * moves.length)];
+      moveUci = m.from + m.to + (m.promotion || '');
+    }
+  } else {
+    const depth = elo >= 1320 ? 10 : lowEloDepth(elo);
+    moveUci = await sfBestMove(chess.fen(), depth);
+  }
 
-  const result = chess.move({ from, to, promotion: promo || 'q' });
+  if (!moveUci || chess.game_over()) return;
+
+  const from  = moveUci.slice(0, 2);
+  const to    = moveUci.slice(2, 4);
+  const promo = moveUci.length === 5 ? moveUci[4] : 'q';
+
+  const result = chess.move({ from, to, promotion: promo });
   if (!result) return;
 
   lastMove = { from, to };
@@ -357,24 +540,91 @@ async function triggerAI() {
     const pEl = toEl.querySelector('.piece, .piece-wrapper');
     if (pEl) { pEl.classList.add('just-moved'); setTimeout(() => pEl.classList.remove('just-moved'), 250); }
   }
+
+  runEval();
 }
 
-/* ── 14. Hint ── */
+/* ── 15. Move Preview (hover eval) ── */
+function getSquareFromPoint(clientX, clientY) {
+  const rect = $board.getBoundingClientRect();
+  if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+  const col = Math.floor((clientX - rect.left) / (rect.width  / 8));
+  const row = Math.floor((clientY - rect.top)  / (rect.height / 8));
+  if (col < 0 || col > 7 || row < 0 || row > 7) return null;
+  return FILES[col] + RANKS[row];
+}
+
+async function doMovePreview(targetSq) {
+  if (!previewEnabled || !selectedSq || sfBusy || gameOver) return;
+  if (!legalMoves.some(m => m.to === targetSq)) return;
+
+  /* Quick eval of the position after this move */
+  const tempChess = new Chess(chess.fen());
+  const piece = tempChess.get(selectedSq);
+  const isPromo = piece && piece.type === 'p' &&
+    ((piece.color === 'w' && targetSq[1] === '8') || (piece.color === 'b' && targetSq[1] === '1'));
+
+  const moveObj = { from: selectedSq, to: targetSq };
+  if (isPromo) moveObj.promotion = 'q';
+  const result = tempChess.move(moveObj);
+  if (!result) return;
+
+  /* Highlight the target */
+  document.querySelectorAll('.preview-target').forEach(el => el.classList.remove('preview-target'));
+  document.querySelectorAll('.preview-badge').forEach(el => el.remove());
+  const targetEl = squareEl(targetSq);
+  if (targetEl) targetEl.classList.add('preview-target');
+
+  const prevStatus = $status.textContent;
+  const prevClass  = $status.className;
+
+  $status.textContent = '🔍 Evaluating ' + result.san + '…';
+  $status.className   = 'status-bar thinking';
+
+  const score = await sfEvaluate(tempChess.fen(), 200);
+
+  $status.textContent = prevStatus;
+  $status.className   = prevClass;
+
+  if (!score) return;
+
+  /* Show badge on the target square */
+  const badgeEl = squareEl(targetSq);
+  if (badgeEl) {
+    const badge = document.createElement('div');
+    badge.className = 'preview-badge';
+    /* Score is from the side to move after the move (Black), flip for White perspective */
+    badge.textContent = formatScore(score, tempChess.turn());
+    badgeEl.appendChild(badge);
+  }
+}
+
+function handleBoardHover(clientX, clientY) {
+  if (!previewEnabled || !selectedSq || sfBusy) return;
+  const sq = getSquareFromPoint(clientX, clientY);
+  if (!sq || sq === selectedSq) return;
+  if (!legalMoves.some(m => m.to === sq)) return;
+
+  clearTimeout(previewDebounce);
+  previewDebounce = setTimeout(() => doMovePreview(sq), 160);
+}
+
+/* ── 16. Hint ── */
 async function doHint() {
   if (gameOver || chess.turn() !== 'w') return;
   if (!sfReady) { $status.textContent = 'AI not ready yet…'; return; }
+  if (sfBusy) return;
 
   $hintBtn.disabled = true;
-
-  const prevText = $status.textContent;
-  const prevClass = $status.className;
-  $status.textContent = '💡 Calculating hint…';
-  $status.className = 'status-bar thinking';
-
-  /* Clear any pending hint highlights */
   clearHintHighlights();
 
-  const bestMove = await sfBestMove(chess.fen(), depthMin, depthMax);
+  const prevText  = $status.textContent;
+  const prevClass = $status.className;
+  $status.textContent = '💡 Calculating hint…';
+  $status.className   = 'status-bar thinking';
+
+  const depth    = Math.min(12, Math.max(6, Math.floor(currentElo / 200)));
+  const bestMove = await sfBestMove(chess.fen(), depth);
 
   $status.textContent = prevText;
   $status.className   = prevClass;
@@ -385,16 +635,11 @@ async function doHint() {
   const hFrom = bestMove.slice(0, 2);
   const hTo   = bestMove.slice(2, 4);
 
-  const fromEl = squareEl(hFrom);
-  const toEl   = squareEl(hTo);
-  if (fromEl) fromEl.classList.add('hint-from');
-  if (toEl)   toEl.classList.add('hint-to');
+  squareEl(hFrom)?.classList.add('hint-from');
+  squareEl(hTo)?.classList.add('hint-to');
 
   if (hintTimeout) clearTimeout(hintTimeout);
-  hintTimeout = setTimeout(() => {
-    clearHintHighlights();
-    hintTimeout = null;
-  }, 3500);
+  hintTimeout = setTimeout(() => { clearHintHighlights(); hintTimeout = null; }, 3500);
 }
 
 function clearHintHighlights() {
@@ -403,20 +648,18 @@ function clearHintHighlights() {
   });
 }
 
-/* ── 15. Undo ── */
+/* ── 17. Undo ── */
 function doUndo() {
   if (chess.history().length === 0) {
     $status.textContent = 'Nothing to undo';
-    $status.className = 'status-bar';
     setTimeout(updateStatus, 1200);
     return;
   }
 
-  /* Undo AI move + player move (2 half-moves) */
-  chess.undo();
-  if (chess.history().length > 0) chess.undo();
+  sfStop();
 
-  /* If it became AI's turn somehow, undo one more */
+  chess.undo();
+  if (chess.history().length > 0 && chess.turn() === 'w') chess.undo();
   if (chess.turn() === 'b' && chess.history().length > 0) chess.undo();
 
   selectedSq = null;
@@ -424,29 +667,28 @@ function doUndo() {
   gameOver   = false;
   lastMove   = null;
 
-  /* Reconstruct lastMove from history */
   const hist = chess.history({ verbose: true });
   if (hist.length > 0) {
     const last = hist[hist.length - 1];
     lastMove = { from: last.from, to: last.to };
   }
 
-  /* Cancel any in-flight Stockfish search */
-  if (stockfish && sfReady) {
-    stockfish.postMessage('stop');
-    sfCallbacks = [];
-  }
-
   clearHintHighlights();
+  document.querySelectorAll('.preview-target').forEach(el => el.classList.remove('preview-target'));
+  document.querySelectorAll('.preview-badge').forEach(el => el.remove());
+
   renderBoard();
   updateStatus();
   refreshHistory();
+  resetEvalBar();
 }
 
-/* ── 16. Square Click ── */
+/* ── 18. Square Click ── */
 function onSquareClick(sq) {
   if (gameOver || chess.turn() !== 'w') return;
   clearHintHighlights();
+  document.querySelectorAll('.preview-target').forEach(el => el.classList.remove('preview-target'));
+  document.querySelectorAll('.preview-badge').forEach(el => el.remove());
 
   if (selectedSq) {
     const isLegal = legalMoves.some(m => m.to === sq);
@@ -466,7 +708,7 @@ function onSquareClick(sq) {
   applySelectionHighlights();
 }
 
-/* ── 17. Drag & Drop ── */
+/* ── 19. Drag & Drop ── */
 let dragGhost = null;
 let dragFrom  = null;
 let dragOffX  = 0;
@@ -476,8 +718,7 @@ function pieceAt(clientX, clientY) {
   if (dragGhost) dragGhost.style.visibility = 'hidden';
   const el = document.elementFromPoint(clientX, clientY);
   if (dragGhost) dragGhost.style.visibility = '';
-  if (!el) return null;
-  const cell = el.closest('[data-sq]');
+  const cell = el?.closest('[data-sq]');
   return cell ? cell.dataset.sq : null;
 }
 
@@ -509,6 +750,7 @@ function moveDrag(clientX, clientY) {
   if (!dragGhost) return;
   dragGhost.style.left = (clientX - dragOffX) + 'px';
   dragGhost.style.top  = (clientY - dragOffY)  + 'px';
+  handleBoardHover(clientX, clientY);
 }
 
 function endDrag(clientX, clientY) {
@@ -518,7 +760,6 @@ function endDrag(clientX, clientY) {
   dragGhost = null;
 
   if (!targetSq || targetSq === dragFrom) { dragFrom = null; return; }
-
   const isLegal = legalMoves.some(m => m.to === targetSq);
   if (isLegal) makeMove(dragFrom, targetSq);
   dragFrom = null;
@@ -534,8 +775,12 @@ function setupDrag() {
     startDrag(cell.dataset.sq, e.clientX, e.clientY, pEl);
   });
 
-  window.addEventListener('mousemove', e => moveDrag(e.clientX, e.clientY));
-  window.addEventListener('mouseup',   e => endDrag(e.clientX, e.clientY));
+  window.addEventListener('mousemove', e => {
+    moveDrag(e.clientX, e.clientY);
+    if (!dragGhost) handleBoardHover(e.clientX, e.clientY);
+  });
+
+  window.addEventListener('mouseup',  e => endDrag(e.clientX, e.clientY));
 
   $board.addEventListener('touchstart', e => {
     const touch = e.changedTouches[0];
@@ -548,7 +793,8 @@ function setupDrag() {
   }, { passive: false });
 
   window.addEventListener('touchmove', e => {
-    moveDrag(e.changedTouches[0].clientX, e.changedTouches[0].clientY);
+    const t = e.changedTouches[0];
+    moveDrag(t.clientX, t.clientY);
   }, { passive: false });
 
   window.addEventListener('touchend', e => {
@@ -556,29 +802,60 @@ function setupDrag() {
   });
 }
 
-/* ── 18. Controls ── */
+/* ── 20. ELO Slider UI ── */
+function updateEloUI(elo) {
+  $eloValue.textContent = elo;
+  $eloTier.textContent  = eloTier(elo);
+  /* Update slider fill gradient */
+  const pct = ((elo - 250) / (3000 - 250) * 100).toFixed(1);
+  $eloSlider.style.setProperty('--slider-pct', pct + '%');
+}
+
+/* ── 21. Controls Setup ── */
 function setupControls() {
-  document.querySelectorAll('.diff-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      depthMin = parseInt(btn.dataset.depthMin, 10);
-      depthMax = parseInt(btn.dataset.depthMax, 10);
-    });
+  /* ELO Slider */
+  $eloSlider.addEventListener('input', () => {
+    currentElo = parseInt($eloSlider.value, 10);
+    updateEloUI(currentElo);
+    applyEloSettings(currentElo);
   });
 
-  $newGameBtn.addEventListener('click', startNewGame);
+  /* Eval toggle */
+  $toggleEval.addEventListener('click', () => {
+    evalEnabled = !evalEnabled;
+    $toggleEval.dataset.active = String(evalEnabled);
+    $evalBarWrap.classList.toggle('visible', evalEnabled);
+    updateBoardSize();
+    if (evalEnabled && !sfBusy && !chess.game_over()) runEval();
+    if (!evalEnabled) resetEvalBar();
+  });
 
-  $hintBtn.addEventListener('click', doHint);
-  $undoBtn.addEventListener('click', doUndo);
+  /* Move preview toggle */
+  $togglePreview.addEventListener('click', () => {
+    previewEnabled = !previewEnabled;
+    $togglePreview.dataset.active = String(previewEnabled);
+  });
 
+  /* Settings panel */
+  $settingsToggle.addEventListener('click', () => {
+    settingsOpen = !settingsOpen;
+    $settingsPanel.classList.toggle('open', settingsOpen);
+    $settingsArrow.textContent = settingsOpen ? '▲' : '▼';
+  });
+
+  /* History panel */
   $historyToggle.addEventListener('click', () => {
     historyOpen = !historyOpen;
     $historyPanel.classList.toggle('open', historyOpen);
     $historyArrow.textContent = historyOpen ? '▲' : '▼';
   });
 
-  /* Piece set switcher */
+  /* Action buttons */
+  $hintBtn.addEventListener('click', doHint);
+  $undoBtn.addEventListener('click', doUndo);
+  $newGameBtn.addEventListener('click', startNewGame);
+
+  /* Piece set */
   document.querySelectorAll('.set-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.set-btn').forEach(b => b.classList.remove('active'));
@@ -589,7 +866,7 @@ function setupControls() {
     });
   });
 
-  /* Promotion modal buttons */
+  /* Promotion modal */
   $promoModal.querySelectorAll('.promo-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       $promoModal.classList.add('hidden');
@@ -598,32 +875,36 @@ function setupControls() {
   });
 }
 
-/* ── 19. New Game ── */
+/* ── 22. New Game ── */
 function startNewGame() {
-  chess     = new Chess();
+  sfStop();
+
+  chess      = new Chess();
   selectedSq = null;
   legalMoves = [];
   lastMove   = null;
   gameOver   = false;
-  sfCallbacks = [];
-  clearHintHighlights();
 
-  if (stockfish && sfReady) {
-    stockfish.postMessage('stop');
-    stockfish.postMessage('ucinewgame');
-  }
+  if (stockfish && sfReady) stockfish.postMessage('ucinewgame');
+
+  clearHintHighlights();
+  document.querySelectorAll('.preview-target').forEach(el => el.classList.remove('preview-target'));
+  document.querySelectorAll('.preview-badge').forEach(el => el.remove());
 
   renderBoard();
   updateStatus();
   refreshHistory();
+  resetEvalBar();
 }
 
-/* ── 20. Init ── */
+/* ── 23. Init ── */
 function initApp() {
   if (typeof Chess === 'undefined') { setTimeout(initApp, 100); return; }
+
   initSplash();
   setupControls();
   setupDrag();
   loadStockfish();
+  updateEloUI(currentElo);
   startNewGame();
 }

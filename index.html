@@ -32,6 +32,14 @@
     <!-- Status Bar -->
     <div id="status-bar" class="status-bar">Your turn</div>
 
+    <!-- Eval Bar (shown only when eval is enabled) -->
+    <div id="eval-bar-wrap" class="eval-bar-wrap">
+      <div class="eval-bar-inner">
+        <div id="eval-bar-white" class="eval-bar-white"></div>
+      </div>
+      <span id="eval-score" class="eval-score">0.0</span>
+    </div>
+
     <!-- Chess Board -->
     <div id="board-wrap">
       <div id="board"></div>
@@ -39,11 +47,6 @@
 
     <!-- Controls -->
     <div class="controls">
-      <div class="difficulty-group">
-        <button class="diff-btn active" data-depth-min="1" data-depth-max="2">Easy</button>
-        <button class="diff-btn" data-depth-min="6" data-depth-max="8">Medium</button>
-        <button class="diff-btn" data-depth-min="14" data-depth-max="16">Hard</button>
-      </div>
       <div class="action-row">
         <button id="hint-btn" class="btn-action">💡 Hint</button>
         <button id="undo-btn" class="btn-action">↩ Undo</button>
@@ -56,12 +59,41 @@
       </div>
     </div>
 
+    <!-- Settings Panel -->
+    <div class="collapsible-section">
+      <button id="settings-toggle" class="section-toggle">
+        ⚙ Settings <span id="settings-arrow">▼</span>
+      </button>
+      <div id="settings-panel" class="section-panel">
+        <div class="settings-content">
+          <div class="elo-row">
+            <span class="elo-label">Strength: <strong id="elo-value">800</strong></span>
+            <span id="elo-tier" class="elo-tier">Casual</span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-edge">250</span>
+            <input type="range" id="elo-slider" class="elo-slider"
+                   min="250" max="3000" step="25" value="800" />
+            <span class="slider-edge">3000</span>
+          </div>
+          <div class="toggle-row">
+            <button id="toggle-eval" class="toggle-btn" data-active="false">
+              📊 Position Eval
+            </button>
+            <button id="toggle-preview" class="toggle-btn" data-active="false">
+              🔍 Move Preview
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Move History -->
-    <div class="history-section">
-      <button id="history-toggle" class="history-toggle">
+    <div class="collapsible-section">
+      <button id="history-toggle" class="section-toggle">
         Move History <span id="history-arrow">▼</span>
       </button>
-      <div id="history-panel" class="history-panel">
+      <div id="history-panel" class="section-panel">
         <div id="history-list" class="history-list"></div>
       </div>
     </div>
