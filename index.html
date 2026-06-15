@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Chess for Dad" />
+  <meta name="theme-color" content="#1a1a2e" />
+  <link rel="manifest" href="manifest.json" />
+  <title>Chess for Dad</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Splash Screen -->
+  <div id="splash">
+    <div class="splash-inner">
+      <div class="splash-knight">♞</div>
+      <h1 class="splash-title">Happy Father's Day, Dad 🎉</h1>
+      <p class="splash-subtitle">A game made just for you</p>
+      <button id="splash-btn" class="btn-gold">Play Chess</button>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="app" class="hidden">
+    <header class="app-header">
+      <span class="header-title">♞ Chess for Dad</span>
+    </header>
+
+    <!-- Status Bar -->
+    <div id="status-bar" class="status-bar">Your turn</div>
+
+    <!-- Chess Board -->
+    <div id="board-wrap">
+      <div id="board"></div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <div class="difficulty-group">
+        <button class="diff-btn active" data-depth-min="1" data-depth-max="2">Easy</button>
+        <button class="diff-btn" data-depth-min="6" data-depth-max="8">Medium</button>
+        <button class="diff-btn" data-depth-min="14" data-depth-max="16">Hard</button>
+      </div>
+      <div class="action-row">
+        <button id="hint-btn" class="btn-action">💡 Hint</button>
+        <button id="undo-btn" class="btn-action">↩ Undo</button>
+        <button id="new-game-btn" class="btn-gold btn-new-game">New Game</button>
+      </div>
+      <div class="piece-set-row">
+        <span class="set-label">Pieces:</span>
+        <button class="set-btn active" data-set="classic">♟ Classic</button>
+        <button class="set-btn" data-set="family">👨‍👩‍👧 Family</button>
+      </div>
+    </div>
+
+    <!-- Move History -->
+    <div class="history-section">
+      <button id="history-toggle" class="history-toggle">
+        Move History <span id="history-arrow">▼</span>
+      </button>
+      <div id="history-panel" class="history-panel">
+        <div id="history-list" class="history-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Promotion Modal -->
+  <div id="promotion-modal" class="hidden">
+    <div class="promotion-box">
+      <p>Promote your pawn</p>
+      <div class="promotion-pieces">
+        <button class="promo-btn" data-piece="q">♕</button>
+        <button class="promo-btn" data-piece="r">♖</button>
+        <button class="promo-btn" data-piece="b">♗</button>
+        <button class="promo-btn" data-piece="n">♘</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

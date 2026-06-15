@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <circle cx="100" cy="100" r="98" fill="#1e2a1a" stroke="#a0e87e" stroke-width="4"/>
+  <text x="100" y="90" text-anchor="middle" font-size="64" font-family="serif">🐶</text>
+  <text x="100" y="130" text-anchor="middle" font-size="18" font-weight="bold" fill="#a0e87e" font-family="-apple-system,sans-serif">Dog (d)</text>
+  <text x="100" y="152" text-anchor="middle" font-size="13" fill="#a0e87e" opacity="0.7" font-family="-apple-system,sans-serif">Replace with photo</text>
+</svg>
