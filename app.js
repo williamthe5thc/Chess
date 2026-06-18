@@ -18,17 +18,39 @@ const UNICODE = {
   bK:'♚', bQ:'♛', bR:'♜', bB:'♝', bN:'♞', bP:'♟',
 };
 
+// Base paths without extension — loader tries jpg, jpeg, png, svg in order
 const FAMILY_IMGS = {
-  K: 'pieces/family/king.svg',
-  Q: 'pieces/family/queen.svg',
-  N: 'pieces/family/knight.svg',
-  B: 'pieces/family/bishop.svg',
-  R: 'pieces/family/rook.svg',
-  P: { a:'pieces/family/pawn_a.svg', b:'pieces/family/pawn_b.svg',
-       c:'pieces/family/pawn_c.svg', d:'pieces/family/pawn_d.svg',
-       e:'pieces/family/pawn_e.svg', f:'pieces/family/pawn_f.svg',
-       g:'pieces/family/pawn_g.svg', h:'pieces/family/pawn_h.svg' },
+  K: 'pieces/family/king',        // king_white.png / king_black.png
+  Q: 'pieces/family/queen',       // queen_white.png / queen_black.png (add when ready)
+  N: { b:'pieces/family/knight_a', g:'pieces/family/knight_b' }, // knight_a/b_white/black.png
+  B: { c:'pieces/family/bishop_a', f:'pieces/family/bishop_b' }, // c-file / f-file
+  R: { a:'pieces/family/rook_a',  h:'pieces/family/rook_b'  }, // a-file / h-file
+  P: { a:'pieces/family/pawn_a', b:'pieces/family/pawn_b',
+       c:'pieces/family/pawn_c', d:'pieces/family/pawn_d',
+       e:'pieces/family/pawn_e', f:'pieces/family/pawn_f',
+       g:'pieces/family/pawn_g', h:'pieces/family/pawn_h' },
 };
+const IMG_EXTS = ['jpg','jpeg','png','svg'];
+
+/* Try each path in order; onLoad(isColorSpecific) fires on first success, onFail if all fail */
+function tryPaths(img, paths, idx, onLoad, onFail) {
+  if (idx >= paths.length) { onFail(); return; }
+  img.onerror = () => tryPaths(img, paths, idx + 1, onLoad, onFail);
+  img.onload  = () => onLoad(idx);
+  img.src = paths[idx];
+}
+
+function setFamilyImg(img, base, colorChar, onColorSpecific, onFail) {
+  const suffix = colorChar === 'w' ? '_white' : '_black';
+  /* Try color-specific variants first, then generic (no suffix) */
+  const paths = [
+    ...IMG_EXTS.map(e => base + suffix + '.' + e),
+    ...IMG_EXTS.map(e => base + '.' + e),
+  ];
+  tryPaths(img, paths, 0, idx => {
+    if (idx < IMG_EXTS.length) onColorSpecific(); /* color-specific loaded */
+  }, onFail);
+}
 
 /* ── 3. ELO Tier Labels ── */
 const ELO_TIERS = [
@@ -201,13 +223,53 @@ function cpToWinPct(score, turn) {
   return 1 / (1 + Math.exp(-cp / 400));
 }
 
-/* ── 5. Game State ── */
+/* ── 5. Move Quality ── */
+const QUALITY = [
+  { maxLoss: -50,  label: 'Brilliant!!', cls: 'quality-best',        symbol: '!!' },
+  { maxLoss:   5,  label: 'Best!',       cls: 'quality-best',        symbol: '!!' },
+  { maxLoss:  20,  label: 'Excellent',   cls: 'quality-great',       symbol: '!'  },
+  { maxLoss:  50,  label: 'Good',        cls: 'quality-good',        symbol: ''   },
+  { maxLoss: 100,  label: 'Inaccuracy',  cls: 'quality-inaccuracy',  symbol: '?!' },
+  { maxLoss: 200,  label: 'Mistake',     cls: 'quality-mistake',     symbol: '?'  },
+  { maxLoss: Infinity, label: 'Blunder', cls: 'quality-blunder',     symbol: '??' },
+];
+
+function normToWhite(score, turn) {
+  if (!score) return 0;
+  const cp = score.type === 'mate'
+    ? (score.value > 0 ? 10000 : -10000)
+    : score.value;
+  return turn === 'w' ? cp : -cp;
+}
+
+function getQuality(cpLoss) {
+  for (const q of QUALITY) { if (cpLoss <= q.maxLoss) return q; }
+  return QUALITY[QUALITY.length - 1];
+}
+
+let qualityTimeout = null;
+
+function flashQuality(cpLoss, playerSide) {
+  if (qualityTimeout) clearTimeout(qualityTimeout);
+  const q = getQuality(cpLoss);
+  const whoLabel = playerSide === 'w' ? 'White' : 'Black';
+  const sym = q.symbol ? ` ${q.symbol}` : '';
+  $status.className = `status-bar ${q.cls}`;
+  $status.textContent = `${q.label}${sym} (${whoLabel} ${cpLoss > 0 ? '-' : '+'}${Math.abs(Math.round(cpLoss / 10) * 10) / 100}♟)`;
+  qualityTimeout = setTimeout(() => {
+    qualityTimeout = null;
+    updateStatus();
+  }, 2200);
+}
+
+/* ── 6. Game State ── */
 let chess;
 let selectedSq       = null;
 let legalMoves       = [];
 let lastMove         = null;
 let currentElo       = 800;
 let gameOver         = false;
+let gameMode         = 'computer'; // 'computer' | 'human'
 let pieceSet         = 'classic';
 let evalEnabled      = false;
 let previewEnabled   = false;
@@ -216,12 +278,14 @@ let historyOpen      = false;
 let hintTimeout      = null;
 let promotionResolve = null;
 let previewDebounce  = null;
-let lastEvalScore    = null;  // stored for display
+let lastEvalScore    = null;
+let preMoveEvalScore = null;  // eval just before the human's move (for quality calc)
+let preMoveEvalTurn  = null;  // whose turn it was when preMoveEvalScore was stored
 
 const FILES = ['a','b','c','d','e','f','g','h'];
 const RANKS = ['8','7','6','5','4','3','2','1'];
 
-/* ── 6. DOM Refs ── */
+/* ── 7. DOM Refs ── */
 const $board          = document.getElementById('board');
 const $status         = document.getElementById('status-bar');
 const $historyList    = document.getElementById('history-list');
@@ -247,16 +311,22 @@ const $evalBarWrap    = document.getElementById('eval-bar-wrap');
 const $evalBarWhite   = document.getElementById('eval-bar-white');
 const $evalScore      = document.getElementById('eval-score');
 
-/* ── 7. Splash ── */
-function initSplash() {
-  $splashBtn.addEventListener('click', () => {
-    $splash.classList.add('fade-out');
-    $app.classList.remove('hidden');
-    setTimeout(() => { $splash.style.display = 'none'; }, 650);
-  });
+/* ── 8. Splash ── */
+function enterApp(mode) {
+  gameMode = mode;
+  $splash.classList.add('fade-out');
+  $app.classList.remove('hidden');
+  setTimeout(() => { $splash.style.display = 'none'; }, 650);
+  /* Update hint button: hide in human mode since there's no AI */
+  $hintBtn.style.display = mode === 'human' ? 'none' : '';
 }
 
-/* ── 8. Board Rendering ── */
+function initSplash() {
+  document.getElementById('splash-vs-computer').addEventListener('click', () => enterApp('computer'));
+  document.getElementById('splash-vs-human').addEventListener('click', () => enterApp('human'));
+}
+
+/* ── 9. Board Rendering ── */
 function squareEl(sq) { return document.querySelector(`[data-sq="${sq}"]`); }
 
 function makePieceEl(piece, sq) {
@@ -267,22 +337,27 @@ function makePieceEl(piece, sq) {
 
     const img = document.createElement('img');
     const type = piece.type.toUpperCase();
-    const src  = type === 'P' ? FAMILY_IMGS.P[sq[0]] : FAMILY_IMGS[type];
-    img.src = src || '';
+    const raw  = FAMILY_IMGS[type];
+    const base = (typeof raw === 'object')
+      ? (raw[sq[0]] || Object.values(raw)[0])  // file-keyed (P, N, etc.) with fallback
+      : raw;
     img.className = `piece-img${piece.color === 'b' ? ' black-piece' : ''}`;
     img.alt = '';
     img.draggable = false;
 
-    img.onerror = () => {
-      wrapper.remove();
-      const cell = squareEl(sq);
-      if (!cell) return;
-      const fb = document.createElement('div');
-      fb.className = `piece ${piece.color === 'w' ? 'white' : 'black'}`;
-      fb.textContent = UNICODE[(piece.color === 'w' ? 'w' : 'b') + piece.type.toUpperCase()];
-      fb.dataset.sq = sq;
-      cell.appendChild(fb);
-    };
+    setFamilyImg(img, base || '', piece.color,
+      () => { img.classList.remove('black-piece'); }, /* color-specific photo — no dim needed */
+      () => {
+        wrapper.remove();
+        const cell = squareEl(sq);
+        if (!cell) return;
+        const fb = document.createElement('div');
+        fb.className = `piece ${piece.color === 'w' ? 'white' : 'black'}`;
+        fb.textContent = UNICODE[(piece.color === 'w' ? 'w' : 'b') + piece.type.toUpperCase()];
+        fb.dataset.sq = sq;
+        cell.appendChild(fb);
+      }
+    );
 
     wrapper.appendChild(img);
     return wrapper;
@@ -353,7 +428,7 @@ function renderBoard() {
 /* Dynamically set the board CSS variable based on current eval bar visibility */
 function updateBoardSize() {
   const evalH   = evalEnabled ? 28 : 0;
-  const fixedH  = 48 + 40 + evalH + 80 + 32; /* header+status+eval+controls+section-toggles */
+  const fixedH  = 48 + 40 + evalH + 56 + 40 + 72 + 16; /* header+status+eval+action-row+piece-row+section-toggles+padding */
   const size    = `min(calc(100dvh - ${fixedH}px - 16px), calc(100vw - 16px))`;
   document.getElementById('board').style.setProperty('--board-size-calc', size);
   document.getElementById('board').style.width  = size;
@@ -394,7 +469,11 @@ function updateStatus() {
   $status.className = 'status-bar';
 
   if (chess.in_checkmate()) {
-    $status.textContent = chess.turn() === 'b' ? 'Checkmate — You win! 🏆' : 'Checkmate — AI wins.';
+    if (gameMode === 'human') {
+      $status.textContent = (chess.turn() === 'b' ? 'White' : 'Black') + ' wins! 🏆';
+    } else {
+      $status.textContent = chess.turn() === 'b' ? 'Checkmate — You win! 🏆' : 'Checkmate — AI wins.';
+    }
     $status.classList.add('game-over');
     gameOver = true; return;
   }
@@ -409,11 +488,19 @@ function updateStatus() {
     gameOver = true; return;
   }
   if (chess.in_check()) {
-    $status.textContent = chess.turn() === 'w' ? '⚠️ Check — your move' : '⚠️ AI is in check';
+    if (gameMode === 'human') {
+      $status.textContent = (chess.turn() === 'w' ? 'White' : 'Black') + ' is in check ⚠️';
+    } else {
+      $status.textContent = chess.turn() === 'w' ? '⚠️ Check — your move' : '⚠️ AI is in check';
+    }
     $status.classList.add('check'); return;
   }
-  $status.textContent = chess.turn() === 'w' ? 'Your turn' : 'AI thinking…';
-  if (chess.turn() === 'b') $status.classList.add('thinking');
+  if (gameMode === 'human') {
+    $status.textContent = (chess.turn() === 'w' ? '♙ White' : '♟ Black') + "'s turn";
+  } else {
+    $status.textContent = chess.turn() === 'w' ? 'Your turn' : 'AI thinking…';
+    if (chess.turn() === 'b') $status.classList.add('thinking');
+  }
 }
 
 /* ── 10. Eval Bar ── */
@@ -475,6 +562,11 @@ async function makeMove(from, to, promoPiece) {
   const moveObj = { from, to };
   if (promoPiece) moveObj.promotion = promoPiece;
 
+  /* Snapshot whose turn it is and the pre-move eval for quality calc */
+  const moverSide       = chess.turn();
+  const savedPreScore   = preMoveEvalScore;
+  const savedPreTurn    = preMoveEvalTurn;
+
   const result = chess.move(moveObj);
   if (!result) return false;
 
@@ -488,8 +580,24 @@ async function makeMove(from, to, promoPiece) {
   refreshHistory();
 
   if (!chess.game_over()) {
-    runEval();      /* eval before AI moves */
-    triggerAI();
+    /* Run post-move eval (quick, 300ms) then show quality and update bar */
+    if (!sfBusy) {
+      const postScore = await sfEvaluate(chess.fen(), 300);
+      if (postScore && savedPreScore) {
+        const preW  = normToWhite(savedPreScore, savedPreTurn || moverSide);
+        const postW = normToWhite(postScore, chess.turn()); /* who is to move now */
+        const cpLoss = moverSide === 'w'
+          ? (preW - postW)   /* White: lost advantage = positive loss */
+          : (postW - preW);  /* Black: White gaining = black losing */
+        flashQuality(cpLoss, moverSide);
+      }
+      showEvalBar(postScore, chess.turn());
+      /* Store as pre-move eval for the next player */
+      preMoveEvalScore = postScore;
+      preMoveEvalTurn  = chess.turn();
+    }
+
+    if (gameMode === 'computer') triggerAI();
   } else {
     runEval();
   }
@@ -498,12 +606,13 @@ async function makeMove(from, to, promoPiece) {
 
 /* ── 14. AI Turn ── */
 async function triggerAI() {
-  if (chess.turn() !== 'b' || chess.game_over()) return;
+  if (gameMode === 'human' || chess.turn() !== 'b' || chess.game_over()) return;
 
   /* If eval is running, cancel it so AI can go */
   if (sfBusy) sfStop();
 
-  updateStatus();
+  /* Don't overwrite the quality flash — only show "Thinking..." if nothing is flashing */
+  if (!qualityTimeout) updateStatus();
 
   const elo    = currentElo;
   const rate   = blunderRate(elo);
@@ -531,6 +640,7 @@ async function triggerAI() {
   if (!result) return;
 
   lastMove = { from, to };
+  if (qualityTimeout) { clearTimeout(qualityTimeout); qualityTimeout = null; }
   renderBoard();
   updateStatus();
   refreshHistory();
@@ -541,7 +651,15 @@ async function triggerAI() {
     if (pEl) { pEl.classList.add('just-moved'); setTimeout(() => pEl.classList.remove('just-moved'), 250); }
   }
 
-  runEval();
+  /* Always eval after AI move so next human move can get quality feedback */
+  if (!sfBusy) {
+    const aiPostScore = await sfEvaluate(chess.fen(), 300);
+    preMoveEvalScore = aiPostScore;
+    preMoveEvalTurn  = chess.turn();
+    if (evalEnabled) showEvalBar(aiPostScore, chess.turn());
+  } else {
+    runEval();
+  }
 }
 
 /* ── 15. Move Preview (hover eval) ── */
@@ -611,7 +729,8 @@ function handleBoardHover(clientX, clientY) {
 
 /* ── 16. Hint ── */
 async function doHint() {
-  if (gameOver || chess.turn() !== 'w') return;
+  if (gameOver) return;
+  if (gameMode === 'computer' && chess.turn() !== 'w') return;
   if (!sfReady) { $status.textContent = 'AI not ready yet…'; return; }
   if (sfBusy) return;
 
@@ -658,9 +777,15 @@ function doUndo() {
 
   sfStop();
 
-  chess.undo();
-  if (chess.history().length > 0 && chess.turn() === 'w') chess.undo();
-  if (chess.turn() === 'b' && chess.history().length > 0) chess.undo();
+  if (gameMode === 'human') {
+    /* Undo just the last half-move (one player's move) */
+    chess.undo();
+  } else {
+    /* Undo AI move + player move (2 half-moves) so player is back in control */
+    chess.undo();
+    if (chess.history().length > 0 && chess.turn() === 'w') chess.undo();
+    if (chess.turn() === 'b' && chess.history().length > 0) chess.undo();
+  }
 
   selectedSq = null;
   legalMoves = [];
@@ -685,7 +810,11 @@ function doUndo() {
 
 /* ── 18. Square Click ── */
 function onSquareClick(sq) {
-  if (gameOver || chess.turn() !== 'w') return;
+  /* In computer mode, only White can move; in human mode, whoever's turn it is */
+  const currentTurn = chess.turn();
+  if (gameOver) return;
+  if (gameMode === 'computer' && currentTurn !== 'w') return;
+
   clearHintHighlights();
   document.querySelectorAll('.preview-target').forEach(el => el.classList.remove('preview-target'));
   document.querySelectorAll('.preview-badge').forEach(el => el.remove());
@@ -696,7 +825,7 @@ function onSquareClick(sq) {
   }
 
   const piece = chess.get(sq);
-  if (piece && piece.color === 'w') {
+  if (piece && piece.color === currentTurn) {
     selectedSq = sq;
     legalMoves = chess.moves({ square: sq, verbose: true });
     applySelectionHighlights();
@@ -723,9 +852,11 @@ function pieceAt(clientX, clientY) {
 }
 
 function startDrag(sq, clientX, clientY, originalEl) {
-  if (chess.turn() !== 'w' || gameOver) return;
+  const currentTurn = chess.turn();
+  if (gameOver) return;
+  if (gameMode === 'computer' && currentTurn !== 'w') return;
   const piece = chess.get(sq);
-  if (!piece || piece.color !== 'w') return;
+  if (!piece || piece.color !== currentTurn) return;
 
   dragFrom   = sq;
   selectedSq = sq;
@@ -879,11 +1010,14 @@ function setupControls() {
 function startNewGame() {
   sfStop();
 
-  chess      = new Chess();
-  selectedSq = null;
-  legalMoves = [];
-  lastMove   = null;
-  gameOver   = false;
+  chess            = new Chess();
+  selectedSq       = null;
+  legalMoves       = [];
+  lastMove         = null;
+  gameOver         = false;
+  preMoveEvalScore = null;
+  preMoveEvalTurn  = null;
+  if (qualityTimeout) { clearTimeout(qualityTimeout); qualityTimeout = null; }
 
   if (stockfish && sfReady) stockfish.postMessage('ucinewgame');
 
@@ -895,6 +1029,14 @@ function startNewGame() {
   updateStatus();
   refreshHistory();
   resetEvalBar();
+
+  /* Seed preMoveEvalScore so the very first human move gets quality feedback */
+  setTimeout(async () => {
+    if (sfReady && !sfBusy) {
+      preMoveEvalScore = await sfEvaluate(chess.fen(), 300);
+      preMoveEvalTurn  = chess.turn();
+    }
+  }, 800);
 }
 
 /* ── 23. Init ── */
