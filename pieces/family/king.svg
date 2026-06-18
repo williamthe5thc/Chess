@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
-  <circle cx="100" cy="100" r="98" fill="#1a1a2e" stroke="#C9A84C" stroke-width="4"/>
-  <text x="100" y="90" text-anchor="middle" font-size="64" font-family="serif">♔</text>
-  <text x="100" y="130" text-anchor="middle" font-size="18" font-weight="bold" fill="#C9A84C" font-family="-apple-system,sans-serif">Dad</text>
-  <text x="100" y="152" text-anchor="middle" font-size="13" fill="#C9A84C" opacity="0.7" font-family="-apple-system,sans-serif">Replace with photo</text>
-</svg>
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid slice"><circle cx="100" cy="100" r="100" fill="#1a1a2e"/><circle cx="100" cy="100" r="96" fill="#1a1a2e" stroke="#C9A84C" stroke-width="6"/><text x="100" y="128" text-anchor="middle" font-size="100" font-family="serif">&#9812;</text><text x="100" y="170" text-anchor="middle" font-size="20" font-weight="bold" fill="#C9A84C" font-family="-apple-system,sans-serif">Dad</text></svg>

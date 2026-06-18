@@ -1,0 +1,10 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <clipPath id="pieceClip">
+      <circle cx="100" cy="100" r="90"/>
+    </clipPath>
+  </defs>
+
+  <!-- JPG image embedded and clipped to circle -->
+  <image x="10" y="10" width="180" height="180" xlink:href="file:///D:/NEW%20LMS/pieces/family/pawn_b2.jpg" clip-path="url(#pieceClip)"/>
+</svg>

@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
-  <circle cx="100" cy="100" r="98" fill="#2e1a1a" stroke="#e87e7e" stroke-width="4"/>
-  <text x="100" y="90" text-anchor="middle" font-size="64" font-family="serif">♖</text>
-  <text x="100" y="130" text-anchor="middle" font-size="18" font-weight="bold" fill="#e87e7e" font-family="-apple-system,sans-serif">Rook</text>
-  <text x="100" y="152" text-anchor="middle" font-size="13" fill="#e87e7e" opacity="0.7" font-family="-apple-system,sans-serif">Replace with photo</text>
-</svg>
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" preserveAspectRatio="xMidYMid slice"><circle cx="100" cy="100" r="100" fill="#2e1a1a"/><circle cx="100" cy="100" r="96" fill="#2e1a1a" stroke="#e87e7e" stroke-width="6"/><text x="100" y="128" text-anchor="middle" font-size="100" font-family="serif">&#9814;</text><text x="100" y="170" text-anchor="middle" font-size="20" font-weight="bold" fill="#e87e7e" font-family="-apple-system,sans-serif">Rook</text></svg>
