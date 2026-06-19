@@ -32,24 +32,51 @@ const FAMILY_IMGS = {
 };
 const IMG_EXTS = ['jpg','jpeg','png','svg'];
 
-/* Try each path in order; onLoad(isColorSpecific) fires on first success, onFail if all fail */
+/* Try each path in order; onLoad(idx, resolvedSrc) fires on first success */
 function tryPaths(img, paths, idx, onLoad, onFail) {
   if (idx >= paths.length) { onFail(); return; }
   img.onerror = () => tryPaths(img, paths, idx + 1, onLoad, onFail);
-  img.onload  = () => onLoad(idx);
+  img.onload  = () => onLoad(idx, paths[idx]);
   img.src = paths[idx];
 }
 
-function setFamilyImg(img, base, colorChar, onColorSpecific, onFail) {
+/* Resolve image with color-specific first, then generic fallback.
+   onResolved(resolvedSrc, isColorSpecific) — called when any image loads. */
+function setFamilyImg(img, base, colorChar, onResolved, onFail) {
   const suffix = colorChar === 'w' ? '_white' : '_black';
-  /* Try color-specific variants first, then generic (no suffix) */
   const paths = [
     ...IMG_EXTS.map(e => base + suffix + '.' + e),
     ...IMG_EXTS.map(e => base + '.' + e),
   ];
-  tryPaths(img, paths, 0, idx => {
-    if (idx < IMG_EXTS.length) onColorSpecific(); /* color-specific loaded */
+  tryPaths(img, paths, 0, (idx, src) => {
+    onResolved(src, idx < IMG_EXTS.length);
   }, onFail);
+}
+
+/* Square → resolved absolute src URL; persists across renderBoard() calls */
+let pieceImgMap = {};
+
+/* Update pieceImgMap after a chess.js move result */
+function applyMoveToImgMap(result) {
+  const { from, to, flags } = result;
+  pieceImgMap[to] = pieceImgMap[from];
+  delete pieceImgMap[from];
+  /* Promotion — clear the pawn's cached src so the new piece gets a fresh image */
+  if (result.promotion) delete pieceImgMap[to];
+  /* En passant — remove captured pawn's cached entry */
+  if (flags && flags.includes('e')) {
+    delete pieceImgMap[to[0] + from[1]];
+  }
+  /* Castling — move the rook too */
+  const rank = from[1];
+  if (flags && flags.includes('k')) { // kingside
+    pieceImgMap['f' + rank] = pieceImgMap['h' + rank];
+    delete pieceImgMap['h' + rank];
+  }
+  if (flags && flags.includes('q')) { // queenside
+    pieceImgMap['d' + rank] = pieceImgMap['a' + rank];
+    delete pieceImgMap['a' + rank];
+  }
 }
 
 /* ── 3. ELO Tier Labels ── */
@@ -223,16 +250,24 @@ function cpToWinPct(score, turn) {
   return 1 / (1 + Math.exp(-cp / 400));
 }
 
-/* ── 5. Move Quality ── */
+/* ── 5. Move Quality (Expected Points model, like Chess.com) ──
+   EP loss thresholds: how much win-probability the mover lost (0–1 scale).
+   Best ≤0, Excellent ≤0.02, Good ≤0.05, Inaccuracy ≤0.10, Mistake ≤0.20, Blunder >0.20 */
 const QUALITY = [
-  { maxLoss: -50,  label: 'Brilliant!!', cls: 'quality-best',        symbol: '!!' },
-  { maxLoss:   5,  label: 'Best!',       cls: 'quality-best',        symbol: '!!' },
-  { maxLoss:  20,  label: 'Excellent',   cls: 'quality-great',       symbol: '!'  },
-  { maxLoss:  50,  label: 'Good',        cls: 'quality-good',        symbol: ''   },
-  { maxLoss: 100,  label: 'Inaccuracy',  cls: 'quality-inaccuracy',  symbol: '?!' },
-  { maxLoss: 200,  label: 'Mistake',     cls: 'quality-mistake',     symbol: '?'  },
-  { maxLoss: Infinity, label: 'Blunder', cls: 'quality-blunder',     symbol: '??' },
+  { maxEP: 0.000, label: 'Best',        cls: 'quality-best',        symbol: '★'  },
+  { maxEP: 0.020, label: 'Excellent',   cls: 'quality-great',       symbol: '!'  },
+  { maxEP: 0.050, label: 'Good',        cls: 'quality-good',        symbol: ''   },
+  { maxEP: 0.100, label: 'Inaccuracy',  cls: 'quality-inaccuracy',  symbol: '?!' },
+  { maxEP: 0.200, label: 'Mistake',     cls: 'quality-mistake',     symbol: '?'  },
+  { maxEP: 1.000, label: 'Blunder',     cls: 'quality-blunder',     symbol: '??' },
 ];
+
+/* Win probability for the side to move, given a Stockfish score (always from mover's POV) */
+function scoreToMoverWP(score) {
+  if (!score) return 0.5;
+  if (score.type === 'mate') return score.value > 0 ? 1.0 : 0.0;
+  return 1 / (1 + Math.exp(-score.value / 400));
+}
 
 function normToWhite(score, turn) {
   if (!score) return 0;
@@ -242,24 +277,147 @@ function normToWhite(score, turn) {
   return turn === 'w' ? cp : -cp;
 }
 
-function getQuality(cpLoss) {
-  for (const q of QUALITY) { if (cpLoss <= q.maxLoss) return q; }
+function getQuality(epLoss) {
+  for (const q of QUALITY) { if (epLoss <= q.maxEP) return q; }
   return QUALITY[QUALITY.length - 1];
 }
 
-let qualityTimeout = null;
+/* ── Piece values for sacrifice detection ── */
+const PIECE_VALS = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 
-function flashQuality(cpLoss, playerSide) {
-  if (qualityTimeout) clearTimeout(qualityTimeout);
-  const q = getQuality(cpLoss);
+/* Returns true if the move gave up material (or moved a piece that can now be recaptured) */
+function detectSacrifice(result) {
+  const movedVal    = PIECE_VALS[result.piece]    || 0;
+  const capturedVal = PIECE_VALS[result.captured] || 0;
+  if (movedVal <= capturedVal) return false; // gained or broke even — not a sacrifice
+  // Confirm the moved piece can actually be recaptured (opponent has a reply to the destination)
+  const opMoves = chess.moves({ verbose: true });
+  return opMoves.some(m => m.to === result.to);
+}
+
+/* ── Opening Book ── */
+/* A move is "Book" if the full game sequence so far is a prefix of a known opening line */
+const OPENING_BOOK = [
+  // 1.e4 openings
+  'e2e4',
+  'e2e4 e7e5',
+  'e2e4 e7e5 g1f3',
+  'e2e4 e7e5 g1f3 b8c6',
+  'e2e4 e7e5 g1f3 b8c6 f1b5',          // Ruy Lopez
+  'e2e4 e7e5 g1f3 b8c6 f1b5 a7a6',     // Morphy Defense
+  'e2e4 e7e5 g1f3 b8c6 f1c4',          // Italian
+  'e2e4 e7e5 g1f3 b8c6 f1c4 f8c5',     // Giuoco Piano
+  'e2e4 e7e5 g1f3 b8c6 f1c4 g8f6',     // Two Knights
+  'e2e4 e7e5 g1f3 b8c6 d2d4',          // Scotch
+  'e2e4 e7e5 g1f3 b8c6 d2d4 e5d4',
+  'e2e4 e7e5 g1f3 g8f6',               // Petrov
+  'e2e4 e7e5 f2f4',                     // King's Gambit
+  'e2e4 e7e5 f2f4 e5f4',
+  'e2e4 e7e5 b1c3',                     // Vienna
+  'e2e4 e7e5 b1c3 b8c6',
+  // Sicilian
+  'e2e4 c7c5',
+  'e2e4 c7c5 g1f3',
+  'e2e4 c7c5 g1f3 d7d6',
+  'e2e4 c7c5 g1f3 b8c6',
+  'e2e4 c7c5 g1f3 e7e6',
+  'e2e4 c7c5 b1c3',
+  'e2e4 c7c5 c2c3',                     // Alapin
+  // French
+  'e2e4 e7e6',
+  'e2e4 e7e6 d2d4',
+  'e2e4 e7e6 d2d4 d7d5',
+  'e2e4 e7e6 d2d4 d7d5 b1c3',
+  'e2e4 e7e6 d2d4 d7d5 b1d2',          // Tarrasch
+  'e2e4 e7e6 d2d4 d7d5 e4e5',          // Advance
+  // Caro-Kann
+  'e2e4 c7c6',
+  'e2e4 c7c6 d2d4',
+  'e2e4 c7c6 d2d4 d7d5',
+  'e2e4 c7c6 d2d4 d7d5 b1c3',
+  'e2e4 c7c6 d2d4 d7d5 e4e5',
+  // Pirc / Modern
+  'e2e4 d7d6',
+  'e2e4 g7g6',
+  // 1.d4 openings
+  'd2d4',
+  'd2d4 d7d5',
+  'd2d4 d7d5 c2c4',                     // Queen's Gambit
+  'd2d4 d7d5 c2c4 e7e6',               // QGD
+  'd2d4 d7d5 c2c4 c7c6',               // Slav
+  'd2d4 d7d5 c2c4 d5c4',               // QGA
+  'd2d4 d7d5 g1f3',
+  'd2d4 d7d5 g1f3 g8f6',
+  // Indian Defenses
+  'd2d4 g8f6',
+  'd2d4 g8f6 c2c4',
+  'd2d4 g8f6 c2c4 g7g6',               // King's Indian
+  'd2d4 g8f6 c2c4 g7g6 b1c3',
+  'd2d4 g8f6 c2c4 e7e6',               // Nimzo / QID setup
+  'd2d4 g8f6 c2c4 e7e6 b1c3 f8b4',    // Nimzo-Indian
+  'd2d4 g8f6 c2c4 e7e6 g1f3 b7b6',    // Queen's Indian
+  'd2d4 g8f6 c2c4 c7c5',              // Benoni
+  'd2d4 f7f5',                          // Dutch
+  // English
+  'c2c4',
+  'c2c4 e7e5',
+  'c2c4 c7c5',
+  'c2c4 g8f6',
+  'c2c4 e7e6',
+  // Reti
+  'g1f3',
+  'g1f3 d7d5',
+  'g1f3 g8f6',
+  'g1f3 d7d5 c2c4',
+  // Other first moves
+  'f2f4',                               // Bird's Opening
+  'g2g3',
+  'b2b3',                               // Larsen's
+  'b1c3',                               // Van Geet
+];
+
+function isBookMove() {
+  const hist = chess.history({ verbose: true });
+  if (hist.length === 0) return false;
+  const uciSeq = hist.map(m => m.from + m.to + (m.promotion || '')).join(' ');
+  return OPENING_BOOK.some(line => line === uciSeq || line.startsWith(uciSeq + ' '));
+}
+
+function flashQuality(epLoss, cpLoss, playerSide, preWP, moverPostWP, wasSacrifice, isBook) {
+  let q;
   const whoLabel = playerSide === 'w' ? 'White' : 'Black';
+  const sign = cpLoss > 0 ? '-' : '+';
+  const pawns = (Math.abs(cpLoss) / 100).toFixed(1);
+
+  if (isBook) {
+    $qualityBar.className = 'quality-bar quality-book';
+    $qualityBar.textContent = `Book move (${whoLabel} ${sign}${pawns}♟)`;
+    return;
+  }
+
+  if (wasSacrifice && epLoss <= 0.02 && preWP < 0.75 && moverPostWP > 0.50) {
+    /* Brilliant: piece sacrifice that still leads to a good position */
+    $qualityBar.className = 'quality-bar quality-brilliant';
+    $qualityBar.textContent = `Brilliant!! (${whoLabel} ${sign}${pawns}♟)`;
+    return;
+  }
+
+  if (preWP < 0.52 && moverPostWP > 0.58 && (moverPostWP - preWP) > 0.08) {
+    /* Great: position flipped from losing/equal to winning */
+    $qualityBar.className = 'quality-bar quality-great-move';
+    $qualityBar.textContent = `Great! (${whoLabel} ${sign}${pawns}♟)`;
+    return;
+  }
+
+  q = getQuality(Math.max(0, epLoss));
   const sym = q.symbol ? ` ${q.symbol}` : '';
-  $status.className = `status-bar ${q.cls}`;
-  $status.textContent = `${q.label}${sym} (${whoLabel} ${cpLoss > 0 ? '-' : '+'}${Math.abs(Math.round(cpLoss / 10) * 10) / 100}♟)`;
-  qualityTimeout = setTimeout(() => {
-    qualityTimeout = null;
-    updateStatus();
-  }, 2200);
+  $qualityBar.className = `quality-bar ${q.cls}`;
+  $qualityBar.textContent = `${q.label}${sym} (${whoLabel} ${sign}${pawns}♟)`;
+}
+
+function clearQualityBar() {
+  $qualityBar.className = 'quality-bar';
+  $qualityBar.textContent = '';
 }
 
 /* ── 6. Game State ── */
@@ -288,6 +446,7 @@ const RANKS = ['8','7','6','5','4','3','2','1'];
 /* ── 7. DOM Refs ── */
 const $board          = document.getElementById('board');
 const $status         = document.getElementById('status-bar');
+const $qualityBar     = document.getElementById('quality-bar');
 const $historyList    = document.getElementById('history-list');
 const $historyPanel   = document.getElementById('history-panel');
 const $historyArrow   = document.getElementById('history-arrow');
@@ -315,10 +474,19 @@ const $evalScore      = document.getElementById('eval-score');
 function enterApp(mode) {
   gameMode = mode;
   $splash.classList.add('fade-out');
+  $splash.style.display = '';
   $app.classList.remove('hidden');
   setTimeout(() => { $splash.style.display = 'none'; }, 650);
-  /* Update hint button: hide in human mode since there's no AI */
-  $hintBtn.style.display = mode === 'human' ? 'none' : '';
+  $hintBtn.style.display = '';
+  startNewGame();
+}
+
+function returnToSplash() {
+  sfStop();
+  clearQualityBar();
+  $app.classList.add('hidden');
+  $splash.style.display = '';
+  $splash.classList.remove('fade-out');
 }
 
 function initSplash() {
@@ -345,9 +513,13 @@ function makePieceEl(piece, sq) {
     img.alt = '';
     img.draggable = false;
 
-    setFamilyImg(img, base || '', piece.color,
-      () => { img.classList.remove('black-piece'); }, /* color-specific photo — no dim needed */
-      () => {
+    const cachedSrc = pieceImgMap[sq];
+    if (cachedSrc) {
+      /* Use the already-resolved src — no fallback chain, no flicker, piece identity preserved */
+      img.src = cachedSrc;
+      if (/_white\.|_black\./.test(cachedSrc)) img.classList.remove('black-piece');
+    } else {
+      const onFail = () => {
         wrapper.remove();
         const cell = squareEl(sq);
         if (!cell) return;
@@ -356,8 +528,12 @@ function makePieceEl(piece, sq) {
         fb.textContent = UNICODE[(piece.color === 'w' ? 'w' : 'b') + piece.type.toUpperCase()];
         fb.dataset.sq = sq;
         cell.appendChild(fb);
-      }
-    );
+      };
+      setFamilyImg(img, base || '', piece.color, (resolvedSrc, isColorSpecific) => {
+        if (isColorSpecific) img.classList.remove('black-piece');
+        pieceImgMap[sq] = resolvedSrc; /* cache so next render is instant */
+      }, onFail);
+    }
 
     wrapper.appendChild(img);
     return wrapper;
@@ -428,8 +604,8 @@ function renderBoard() {
 /* Dynamically set the board CSS variable based on current eval bar visibility */
 function updateBoardSize() {
   const evalH   = evalEnabled ? 28 : 0;
-  const fixedH  = 48 + 40 + evalH + 56 + 40 + 72 + 16; /* header+status+eval+action-row+piece-row+section-toggles+padding */
-  const size    = `min(calc(100dvh - ${fixedH}px - 16px), calc(100vw - 16px))`;
+  const fixedH  = 48 + 40 + 22 + evalH + 56 + 40 + 72 + 16; /* header+status+quality+eval+action-row+piece-row+section-toggles+padding */
+  const size    = `min(920px, calc(100dvh - ${fixedH}px - 16px), calc(100vw - 16px))`;
   document.getElementById('board').style.setProperty('--board-size-calc', size);
   document.getElementById('board').style.width  = size;
   document.getElementById('board').style.height = size;
@@ -559,6 +735,7 @@ async function makeMove(from, to, promoPiece) {
     return makeMove(from, to, chosen);
   }
 
+  clearQualityBar();
   const moveObj = { from, to };
   if (promoPiece) moveObj.promotion = promoPiece;
 
@@ -570,10 +747,15 @@ async function makeMove(from, to, promoPiece) {
   const result = chess.move(moveObj);
   if (!result) return false;
 
+  applyMoveToImgMap(result);
   lastMove   = { from, to };
   selectedSq = null;
   legalMoves = [];
   gameOver   = false;
+
+  /* Detect book / sacrifice now, while board is in post-move state */
+  const moveIsBook      = isBookMove();
+  const moveIsSacrifice = !moveIsBook && detectSacrifice(result);
 
   renderBoard();
   updateStatus();
@@ -584,12 +766,17 @@ async function makeMove(from, to, promoPiece) {
     if (!sfBusy) {
       const postScore = await sfEvaluate(chess.fen(), 300);
       if (postScore && savedPreScore) {
-        const preW  = normToWhite(savedPreScore, savedPreTurn || moverSide);
-        const postW = normToWhite(postScore, chess.turn()); /* who is to move now */
-        const cpLoss = moverSide === 'w'
-          ? (preW - postW)   /* White: lost advantage = positive loss */
-          : (postW - preW);  /* Black: White gaining = black losing */
-        flashQuality(cpLoss, moverSide);
+        /* Expected Points — win-probability from mover's perspective */
+        const preWP       = scoreToMoverWP(savedPreScore);
+        const moverPostWP = 1 - scoreToMoverWP(postScore); // opponent to move now
+        const epLoss      = preWP - moverPostWP;           // negative = position improved
+
+        /* Centipawn change (White's perspective) for the display number */
+        const preW   = normToWhite(savedPreScore, savedPreTurn || moverSide);
+        const postW  = normToWhite(postScore, chess.turn());
+        const cpLoss = moverSide === 'w' ? (preW - postW) : (postW - preW);
+
+        flashQuality(epLoss, cpLoss, moverSide, preWP, moverPostWP, moveIsSacrifice, moveIsBook);
       }
       showEvalBar(postScore, chess.turn());
       /* Store as pre-move eval for the next player */
@@ -611,8 +798,7 @@ async function triggerAI() {
   /* If eval is running, cancel it so AI can go */
   if (sfBusy) sfStop();
 
-  /* Don't overwrite the quality flash — only show "Thinking..." if nothing is flashing */
-  if (!qualityTimeout) updateStatus();
+  updateStatus();
 
   const elo    = currentElo;
   const rate   = blunderRate(elo);
@@ -639,8 +825,8 @@ async function triggerAI() {
   const result = chess.move({ from, to, promotion: promo });
   if (!result) return;
 
+  applyMoveToImgMap(result);
   lastMove = { from, to };
-  if (qualityTimeout) { clearTimeout(qualityTimeout); qualityTimeout = null; }
   renderBoard();
   updateStatus();
   refreshHistory();
@@ -787,10 +973,11 @@ function doUndo() {
     if (chess.turn() === 'b' && chess.history().length > 0) chess.undo();
   }
 
-  selectedSq = null;
-  legalMoves = [];
-  gameOver   = false;
-  lastMove   = null;
+  selectedSq  = null;
+  legalMoves  = [];
+  gameOver    = false;
+  lastMove    = null;
+  pieceImgMap = {}; /* clear cache — pieces return to starting squares, re-resolve cleanly */
 
   const hist = chess.history({ verbose: true });
   if (hist.length > 0) {
@@ -802,10 +989,23 @@ function doUndo() {
   document.querySelectorAll('.preview-target').forEach(el => el.classList.remove('preview-target'));
   document.querySelectorAll('.preview-badge').forEach(el => el.remove());
 
+  preMoveEvalScore = null;
+  preMoveEvalTurn  = null;
+  clearQualityBar();
+
   renderBoard();
   updateStatus();
   refreshHistory();
   resetEvalBar();
+
+  /* Re-seed eval so the next human move gets quality feedback */
+  setTimeout(async () => {
+    if (sfReady && !sfBusy) {
+      preMoveEvalScore = await sfEvaluate(chess.fen(), 300);
+      preMoveEvalTurn  = chess.turn();
+      if (evalEnabled) showEvalBar(preMoveEvalScore, chess.turn());
+    }
+  }, 400);
 }
 
 /* ── 18. Square Click ── */
@@ -984,7 +1184,7 @@ function setupControls() {
   /* Action buttons */
   $hintBtn.addEventListener('click', doHint);
   $undoBtn.addEventListener('click', doUndo);
-  $newGameBtn.addEventListener('click', startNewGame);
+  $newGameBtn.addEventListener('click', returnToSplash);
 
   /* Piece set */
   document.querySelectorAll('.set-btn').forEach(btn => {
@@ -1017,7 +1217,8 @@ function startNewGame() {
   gameOver         = false;
   preMoveEvalScore = null;
   preMoveEvalTurn  = null;
-  if (qualityTimeout) { clearTimeout(qualityTimeout); qualityTimeout = null; }
+  pieceImgMap      = {};
+  clearQualityBar();
 
   if (stockfish && sfReady) stockfish.postMessage('ucinewgame');
 
@@ -1048,5 +1249,4 @@ function initApp() {
   setupDrag();
   loadStockfish();
   updateEloUI(currentElo);
-  startNewGame();
 }

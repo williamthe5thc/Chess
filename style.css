@@ -184,6 +184,25 @@ html, body {
 .status-bar.check     { color: #ff6b6b; }
 .status-bar.game-over { color: var(--gold); }
 
+/* ── Quality Bar ── */
+.quality-bar {
+  min-height: 22px;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 0.03em;
+  padding-bottom: 2px;
+}
+.quality-bar.quality-brilliant  { color: #ffd700; }
+.quality-bar.quality-great-move { color: #00e5ff; }
+.quality-bar.quality-book       { color: #90a4ae; }
+.quality-bar.quality-best       { color: #69f0ae; }
+.quality-bar.quality-great      { color: #b2ff59; }
+.quality-bar.quality-good       { color: #c8e6c9; }
+.quality-bar.quality-inaccuracy { color: #ffd740; }
+.quality-bar.quality-mistake    { color: #ff9100; }
+.quality-bar.quality-blunder    { color: #ff1744; }
+
 /* ── Eval Bar ── */
 .eval-bar-wrap {
   height: 0;
